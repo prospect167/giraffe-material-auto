@@ -1,0 +1,26 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: giraffe-material-auto
+
+# 生产环境配置
+material:
+  download:
+    base-path: /data/downloads
+    timeout: 60000
+    max-retry: 5
+    user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+
+logging:
+  level:
+    root: WARN
+    com.tcxy.xygj: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+  file:
+    name: logs/giraffe-material-auto.log
+    max-size: 100MB
+    max-history: 30
+

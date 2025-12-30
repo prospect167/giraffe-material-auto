@@ -1,0 +1,68 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: giraffe-material-auto
+
+# 图片下载配置
+material:
+  download:
+    # 默认下载目录
+    base-path: ./downloads
+    # 超时时间（毫秒）
+    timeout: 30000
+    # 最大重试次数
+    max-retry: 3
+    # User-Agent
+    user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+
+# 注意：日志配置已迁移到 log4j2.xml
+# logging:
+#   level:
+#     root: INFO
+#     com.tcxy.xygj: DEBUG
+
+# 水印去除配置
+watermark-removal:
+  # 全局开关（默认关闭）
+  enabled: false
+  
+  # 默认使用的厂商: aliyun, tencent, baidu, disabled
+  default-provider: disabled
+  
+  # 是否保存原图
+  save-original: false
+  
+  # 超时时间（毫秒）
+  timeout: 30000
+  
+  # 最大重试次数
+  max-retry: 2
+  
+  # 阿里云配置
+  aliyun:
+    enabled: false
+    access-key-id: ${ALIYUN_ACCESS_KEY_ID:}
+    access-key-secret: ${ALIYUN_ACCESS_KEY_SECRET:}
+    endpoint: imageprocess.cn-shanghai.aliyuncs.com
+    free-quota: 1000  # 每月免费次数提示
+    
+  # 腾讯云配置  
+  tencent:
+    enabled: false
+    secret-id: ${TENCENT_SECRET_ID:}
+    secret-key: ${TENCENT_SECRET_KEY:}
+    region: ap-shanghai
+    bucket: ${TENCENT_BUCKET:}
+    free-quota: 1000  # 每月免费次数提示
+    
+  # 百度智能云配置
+  baidu:
+    enabled: false
+    api-key: ${BAIDU_API_KEY:}
+    secret-key: ${BAIDU_SECRET_KEY:}
+    free-quota: 500  # 每日免费次数提示
+
