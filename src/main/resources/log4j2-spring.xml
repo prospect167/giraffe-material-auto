@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="WARN" monitorInterval="30">
     <Properties>
-        <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n</Property>
+        <!-- 日志输出格式（包含类名、方法名、行号） -->
+        <Property name="LOG_PATTERN">%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} [%C{1}:%M:%L] - %msg%n</Property>
         <Property name="LOG_PATH">./logs</Property>
         <Property name="APP_NAME">giraffe-material-auto</Property>
     </Properties>
@@ -36,7 +37,7 @@
     </Appenders>
 
     <Loggers>
-        <Logger name="com.tcxy.xygj" level="DEBUG" additivity="false">
+        <Logger name="com.prospect.giraffe" level="DEBUG" additivity="false">
             <AppenderRef ref="Console"/>
             <AppenderRef ref="RollingFileAll"/>
             <AppenderRef ref="RollingFileError"/>

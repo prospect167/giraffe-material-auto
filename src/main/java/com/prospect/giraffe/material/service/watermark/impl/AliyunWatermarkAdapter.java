@@ -1,4 +1,4 @@
-//package com.tcxy.xygj.material.service.watermark.impl;
+//package com.prospect.giraffe.material.service.watermark.impl;
 //
 //import com.aliyun.imm20200930.Client;
 //import com.aliyun.imm20200930.models.*;
@@ -6,8 +6,8 @@
 //import com.aliyun.teaopenapi.models.Config;
 //import com.google.gson.Gson;
 //import com.google.gson.JsonObject;
-//import com.tcxy.xygj.material.config.WatermarkRemovalConfig;
-//import com.tcxy.xygj.material.service.watermark.IWatermarkRemovalAdapter;
+//import com.prospect.giraffe.material.config.WatermarkRemovalConfig;
+//import com.prospect.giraffe.material.service.watermark.IWatermarkRemovalAdapter;
 //import lombok.extern.slf4j.Slf4j;
 //import okhttp3.*;
 //import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;

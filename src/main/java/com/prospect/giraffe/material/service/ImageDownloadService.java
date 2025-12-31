@@ -1,6 +1,8 @@
 package com.prospect.giraffe.material.service;
 
 import com.prospect.giraffe.material.config.DownloadConfig;
+import com.prospect.giraffe.material.dto.BatchDownloadRequest;
+import com.prospect.giraffe.material.dto.BatchDownloadResponse;
 import com.prospect.giraffe.material.dto.DownloadRequest;
 import com.prospect.giraffe.material.dto.DownloadResponse;
 import com.prospect.giraffe.material.service.watermark.dto.WatermarkRemovalResult;
@@ -29,6 +31,10 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -84,7 +90,7 @@ public class ImageDownloadService {
             }
 
             // 2. 创建目标目录
-            String baseSavePath = createTargetDirectory(request.getTargetDir());
+            String baseSavePath = createTargetDirectory(request);
             
             // 如果启用了水印去除，创建两个子目录
             boolean watermarkEnabled = request.getRemoveWatermark() != null && request.getRemoveWatermark();
@@ -113,10 +119,18 @@ public class ImageDownloadService {
             AtomicLong watermarkTotalTime = new AtomicLong(0);
             List<String> watermarkFailureReasons = new ArrayList<>();
 
+            // 失败原因统计
+            java.util.Map<String, Integer> failureReasons = new java.util.HashMap<>();
+            
             for (String imageUrl : imageUrls) {
                 try {
+                    // 添加请求间隔，避免请求过快被限流
+                    if (downloadConfig.getRequestInterval() != null && downloadConfig.getRequestInterval() > 0) {
+                        Thread.sleep(downloadConfig.getRequestInterval());
+                    }
+                    
                     // 下载到原图目录
-                    File downloadedFile = downloadSingleImage(imageUrl, originalPath, request.getConvertToJpeg());
+                    File downloadedFile = downloadSingleImage(imageUrl, originalPath, request.getUrl(), request.getConvertToJpeg());
 
                     // 去除水印（如果启用）
                     if (watermarkEnabled && downloadedFile != null) {
@@ -141,11 +155,28 @@ public class ImageDownloadService {
 
                     successCount.incrementAndGet();
                     log.debug("成功下载: {}", imageUrl);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    failCount.incrementAndGet();
+                    failedUrls.add(imageUrl);
+                    String reason = "下载被中断";
+                    failureReasons.put(reason, failureReasons.getOrDefault(reason, 0) + 1);
+                    log.error("下载失败: {}, 原因: {}", imageUrl, reason, e);
                 } catch (Exception e) {
                     failCount.incrementAndGet();
                     failedUrls.add(imageUrl);
-                    log.error("下载失败: {}, 错误: {}", imageUrl, e.getMessage());
+                    String reason = extractFailureReason(e);
+                    failureReasons.put(reason, failureReasons.getOrDefault(reason, 0) + 1);
+                    log.error("下载失败: {}, 原因: {}, 错误详情", imageUrl, reason, e);
                 }
+            }
+            
+            // 打印失败原因统计
+            if (!failureReasons.isEmpty()) {
+                log.warn("下载失败原因统计:");
+                failureReasons.forEach((reason, count) -> 
+                    log.warn("  {}: {} 次", reason, count)
+                );
             }
 
             long duration = System.currentTimeMillis() - startTime;
@@ -290,13 +321,13 @@ public class ImageDownloadService {
         // 方法1: 查找常见的分页选择器
         String[] paginationSelectors = {
                 "div.paginator a",           // 豆瓣风格
-                "div.pagination a",          // 通用
-                "ul.pagination a",
-                "div.page a",
-                "div.pages a",
-                "a[href*=page]",
-                "a[href*=start]",
-                "a.next",                    // 下一页链接
+//                "div.pagination a",          // 通用
+//                "ul.pagination a",
+//                "div.page a",
+//                "div.pages a",
+//                "a[href*=page]",
+//                "a[href*=start]",
+//                "a.next",                    // 下一页链接
                 ".page-link"
         };
         
@@ -473,25 +504,78 @@ public class ImageDownloadService {
     /**
      * 创建目标目录
      *
-     * @param targetDir 目标目录
+     * @param request 下载请求
      * @return 完整路径
      * @throws IOException IO异常
      */
-    private String createTargetDirectory(String targetDir) throws IOException {
-        String basePath = downloadConfig.getBasePath();
-        String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-
+    private String createTargetDirectory(DownloadRequest request) throws IOException {
         String fullPath;
-        if (targetDir != null && !targetDir.isEmpty()) {
-            fullPath = basePath + File.separator + targetDir + File.separator + timestamp;
-        } else {
-            fullPath = basePath + File.separator + timestamp;
+
+        // 优先级1: 使用 savePath（最高优先级）
+        if (request.getSavePath() != null && !request.getSavePath().isEmpty()) {
+            fullPath = resolvePath(request.getSavePath());
+            log.info("使用指定的保存路径: {}", fullPath);
+        }
+        // 优先级2: 使用 targetDir
+        else if (request.getTargetDir() != null && !request.getTargetDir().isEmpty()) {
+            String targetDir = request.getTargetDir();
+            
+            // 判断是绝对路径还是相对路径
+            if (targetDir.startsWith("/") || targetDir.matches("^[a-zA-Z]:.*")) {
+                // 绝对路径
+                fullPath = targetDir;
+                log.info("使用绝对路径: {}", fullPath);
+            } else {
+                // 相对路径，拼接 basePath
+                fullPath = downloadConfig.getBasePath() + File.separator + targetDir;
+                log.info("使用相对路径，基于 basePath: {}", fullPath);
+            }
+        }
+        // 优先级3: 使用默认 basePath
+        else {
+            fullPath = downloadConfig.getBasePath();
+            log.info("使用默认 basePath: {}", fullPath);
         }
 
+        // 是否添加时间戳子目录
+        boolean useTimestamp = request.getUseTimestamp() != null ? request.getUseTimestamp() : true;
+        if (useTimestamp) {
+            String timestampFormat = request.getTimestampFormat();
+            if (timestampFormat == null || timestampFormat.isEmpty()) {
+                timestampFormat = "yyyyMMdd_HHmmss";  // 默认格式
+            }
+            
+            try {
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern(timestampFormat));
+                fullPath = fullPath + File.separator + timestamp;
+                log.info("添加时间戳子目录: {}", timestamp);
+            } catch (Exception e) {
+                log.warn("时间戳格式错误: {}, 使用默认格式", timestampFormat);
+                String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                fullPath = fullPath + File.separator + timestamp;
+            }
+        }
+
+        // 创建目录
         Path path = Paths.get(fullPath);
         Files.createDirectories(path);
+        log.info("目标目录已创建: {}", fullPath);
 
         return fullPath;
+    }
+
+    /**
+     * 解析路径（处理相对路径和绝对路径）
+     *
+     * @param path 路径
+     * @return 解析后的路径
+     */
+    private String resolvePath(String path) {
+        if (path.startsWith("~")) {
+            // 处理 ~ 开头的路径
+            return System.getProperty("user.home") + path.substring(1);
+        }
+        return path;
     }
 
     /**
@@ -499,31 +583,87 @@ public class ImageDownloadService {
      *
      * @param imageUrl      图片URL
      * @param savePath      保存路径
+     * @param refererUrl    来源URL（用于设置Referer请求头）
      * @param convertToJpeg 是否转换为JPEG
      * @return 下载的文件
      * @throws IOException IO异常
      */
-    private File downloadSingleImage(String imageUrl, String savePath, Boolean convertToJpeg) throws IOException {
+    private File downloadSingleImage(String imageUrl, String savePath, String refererUrl, Boolean convertToJpeg) throws IOException {
         int retryCount = 0;
         Exception lastException = null;
+        int connectTimeout = downloadConfig.getConnectTimeout() != null ? downloadConfig.getConnectTimeout() : 10000;
+        int readTimeout = downloadConfig.getReadTimeout() != null ? downloadConfig.getReadTimeout() : 60000;
 
         while (retryCount < downloadConfig.getMaxRetry()) {
+            HttpURLConnection connection = null;
             try {
                 // 获取文件名
                 String fileName = extractFileName(imageUrl);
 
                 // 创建连接
                 URL url = new URL(imageUrl);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection = (HttpURLConnection) url.openConnection();
+                
+                // 设置请求头
                 connection.setRequestProperty("User-Agent", downloadConfig.getUserAgent());
-                connection.setConnectTimeout(downloadConfig.getTimeout());
-                connection.setReadTimeout(downloadConfig.getTimeout());
+                if (refererUrl != null && !refererUrl.isEmpty()) {
+                    connection.setRequestProperty("Referer", refererUrl);
+                }
+                connection.setRequestProperty("Accept", "image/webp,image/apng,image/*,*/*;q=0.8");
+                connection.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+                connection.setRequestProperty("Accept-Encoding", "gzip, deflate, br");
+                connection.setRequestProperty("Connection", "keep-alive");
+                connection.setRequestProperty("Cache-Control", "no-cache");
+                
+                // 设置超时
+                connection.setConnectTimeout(connectTimeout);
+                connection.setReadTimeout(readTimeout);
+                
+                // 允许重定向
+                connection.setInstanceFollowRedirects(true);
+                
                 connection.connect();
 
                 // 检查响应码
                 int responseCode = connection.getResponseCode();
-                if (responseCode != HttpURLConnection.HTTP_OK) {
+                
+                // 处理重定向
+                if (responseCode == HttpURLConnection.HTTP_MOVED_PERM || 
+                    responseCode == HttpURLConnection.HTTP_MOVED_TEMP ||
+                    responseCode == HttpURLConnection.HTTP_SEE_OTHER) {
+                    String redirectUrl = connection.getHeaderField("Location");
+                    if (redirectUrl != null) {
+                        log.debug("图片URL重定向: {} -> {}", imageUrl, redirectUrl);
+                        connection.disconnect();
+                        // 递归下载重定向后的URL
+                        return downloadSingleImage(redirectUrl, savePath, refererUrl, convertToJpeg);
+                    }
+                }
+                
+                // 处理各种HTTP状态码
+                if (responseCode == HttpURLConnection.HTTP_FORBIDDEN) {
+                    connection.disconnect();
+                    throw new IOException("HTTP 403 禁止访问，可能被服务器拒绝");
+                } else if (responseCode == HttpURLConnection.HTTP_UNAVAILABLE) {
+                    connection.disconnect();
+                    throw new IOException("HTTP 503 服务不可用，服务器可能过载");
+                } else if (responseCode == 429) {
+                    // Too Many Requests
+                    String retryAfter = connection.getHeaderField("Retry-After");
+                    int waitSeconds = retryAfter != null ? Integer.parseInt(retryAfter) : (int) Math.pow(2, retryCount);
+                    log.warn("HTTP 429 请求过多，等待 {} 秒后重试", waitSeconds);
+                    connection.disconnect();
+                    Thread.sleep(waitSeconds * 1000L);
+                    throw new IOException("HTTP 429 请求过多，需要等待");
+                } else if (responseCode != HttpURLConnection.HTTP_OK) {
+                    connection.disconnect();
                     throw new IOException("HTTP响应码: " + responseCode);
+                }
+
+                // 检查Content-Type
+                String contentType = connection.getContentType();
+                if (contentType != null && !contentType.startsWith("image/")) {
+                    log.warn("URL返回的不是图片类型: {}, Content-Type: {}", imageUrl, contentType);
                 }
 
                 // 下载并保存
@@ -540,7 +680,8 @@ public class ImageDownloadService {
                             // 保存为JPEG
                             ImageIO.write(image, "JPEG", outputFile);
                         } else {
-                            throw new IOException("无法读取图片内容");
+                            connection.disconnect();
+                            throw new IOException("无法读取图片内容，可能不是有效的图片格式");
                         }
                     }
                 } else {
@@ -551,14 +692,54 @@ public class ImageDownloadService {
                     }
                 }
 
+                connection.disconnect();
                 return outputFile; // 成功，返回下载的文件
 
-            } catch (Exception e) {
+            } catch (InterruptedException e) {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+                Thread.currentThread().interrupt();
+                throw new IOException("下载被中断", e);
+            } catch (java.net.SocketTimeoutException e) {
+                if (connection != null) {
+                    connection.disconnect();
+                }
                 lastException = e;
                 retryCount++;
-                log.warn("下载失败，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), imageUrl);
+                log.warn("下载超时，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), imageUrl);
+                // 指数退避：第1次重试等1秒，第2次等2秒，第3次等4秒
                 try {
-                    Thread.sleep(1000); // 重试前等待1秒
+                    Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("下载被中断", ie);
+                }
+            } catch (java.net.ConnectException e) {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+                lastException = e;
+                retryCount++;
+                log.warn("连接失败，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), imageUrl);
+                // 指数退避
+                try {
+                    Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("下载被中断", ie);
+                }
+            } catch (Exception e) {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+                lastException = e;
+                retryCount++;
+                log.warn("下载失败，正在重试 ({}/{}): {}, 错误: {}", 
+                        retryCount, downloadConfig.getMaxRetry(), imageUrl, e.getMessage());
+                // 指数退避
+                try {
+                    Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new IOException("下载被中断", ie);
@@ -567,7 +748,48 @@ public class ImageDownloadService {
         }
 
         // 所有重试都失败
-        throw new IOException("下载失败，已重试" + downloadConfig.getMaxRetry() + "次", lastException);
+        throw new IOException("下载失败，已重试" + downloadConfig.getMaxRetry() + "次: " + 
+                (lastException != null ? lastException.getMessage() : "未知错误"), lastException);
+    }
+    
+    /**
+     * 提取失败原因
+     *
+     * @param e 异常
+     * @return 失败原因描述
+     */
+    private String extractFailureReason(Exception e) {
+        if (e == null) {
+            return "未知错误";
+        }
+        
+        String message = e.getMessage();
+        if (message == null) {
+            message = e.getClass().getSimpleName();
+        }
+        
+        // 根据异常类型和消息提取原因
+        if (e instanceof java.net.SocketTimeoutException) {
+            return "连接超时";
+        } else if (e instanceof java.net.ConnectException) {
+            return "连接失败";
+        } else if (message.contains("HTTP 403")) {
+            return "HTTP 403 禁止访问";
+        } else if (message.contains("HTTP 429")) {
+            return "HTTP 429 请求过多";
+        } else if (message.contains("HTTP 503")) {
+            return "HTTP 503 服务不可用";
+        } else if (message.contains("HTTP响应码")) {
+            return message;
+        } else if (message.contains("无法读取图片内容")) {
+            return "图片格式无效";
+        } else if (message.contains("超时")) {
+            return "请求超时";
+        } else if (message.contains("连接")) {
+            return "网络连接问题";
+        }
+        
+        return message.length() > 50 ? message.substring(0, 50) + "..." : message;
     }
 
     /**
@@ -608,6 +830,239 @@ public class ImageDownloadService {
             return fileName.substring(0, lastDot);
         }
         return fileName;
+    }
+
+    /**
+     * 批量下载多个页面的图片
+     *
+     * @param request 批量下载请求
+     * @return 批量下载结果
+     */
+    public BatchDownloadResponse batchDownloadImages(BatchDownloadRequest request) {
+        long startTime = System.currentTimeMillis();
+        log.info("开始批量下载，页面数: {}, 并发模式: {}, 最大并发数: {}", 
+                request.getUrls().size(), request.getConcurrent(), request.getMaxConcurrency());
+
+        List<BatchDownloadResponse.PageDownloadResult> pageResults = new ArrayList<>();
+        AtomicInteger totalImages = new AtomicInteger(0);
+        AtomicInteger successImages = new AtomicInteger(0);
+        AtomicInteger failImages = new AtomicInteger(0);
+
+        if (request.getConcurrent() != null && request.getConcurrent()) {
+            // 并发下载模式
+            pageResults = batchDownloadConcurrent(request, totalImages, successImages, failImages);
+        } else {
+            // 串行下载模式
+            pageResults = batchDownloadSequential(request, totalImages, successImages, failImages);
+        }
+
+        long totalDuration = System.currentTimeMillis() - startTime;
+        
+        // 统计成功和失败的页面数
+        int successPages = (int) pageResults.stream()
+                .filter(r -> r.getSuccess() != null && r.getSuccess())
+                .count();
+        int failPages = pageResults.size() - successPages;
+
+        // 汇总统计
+        boolean overallSuccess = failPages == 0;
+
+        log.info("批量下载完成，总页面数: {}, 成功: {}, 失败: {}, 总图片数: {}, 成功: {}, 失败: {}, 总耗时: {}ms",
+                request.getUrls().size(), successPages, failPages, 
+                totalImages.get(), successImages.get(), failImages.get(), totalDuration);
+
+        return BatchDownloadResponse.builder()
+                .success(overallSuccess)
+                .message(overallSuccess ? "所有页面下载完成" : String.format("部分页面下载失败，成功: %d, 失败: %d", successPages, failPages))
+                .totalPages(request.getUrls().size())
+                .successPages(successPages)
+                .failPages(failPages)
+                .totalImages(totalImages.get())
+                .successImages(successImages.get())
+                .failImages(failImages.get())
+                .totalDuration(totalDuration)
+                .pageResults(pageResults)
+                .build();
+    }
+
+    /**
+     * 并发下载多个页面
+     *
+     * @param request 批量下载请求
+     * @param totalImages 总图片数统计
+     * @param successImages 成功图片数统计
+     * @param failImages 失败图片数统计
+     * @return 每个页面的下载结果
+     */
+    private List<BatchDownloadResponse.PageDownloadResult> batchDownloadConcurrent(
+            BatchDownloadRequest request,
+            AtomicInteger totalImages,
+            AtomicInteger successImages,
+            AtomicInteger failImages) {
+        
+        int maxConcurrency = request.getMaxConcurrency() != null ? request.getMaxConcurrency() : 3;
+        ExecutorService executor = Executors.newFixedThreadPool(maxConcurrency);
+        List<Future<BatchDownloadResponse.PageDownloadResult>> futures = new ArrayList<>();
+
+        try {
+            // 提交所有下载任务
+            for (String url : request.getUrls()) {
+                Future<BatchDownloadResponse.PageDownloadResult> future = executor.submit(() -> {
+                    return downloadSinglePage(url, request, totalImages, successImages, failImages);
+                });
+                futures.add(future);
+            }
+
+            // 收集结果
+            List<BatchDownloadResponse.PageDownloadResult> results = new ArrayList<>();
+            for (Future<BatchDownloadResponse.PageDownloadResult> future : futures) {
+                try {
+                    BatchDownloadResponse.PageDownloadResult result = future.get();
+                    results.add(result);
+                } catch (Exception e) {
+                    log.error("获取页面下载结果异常", e);
+                    // 创建一个失败的结果
+                    results.add(BatchDownloadResponse.PageDownloadResult.builder()
+                            .url("未知")
+                            .success(false)
+                            .message("获取下载结果异常: " + e.getMessage())
+                            .totalCount(0)
+                            .successCount(0)
+                            .failCount(0)
+                            .duration(0L)
+                            .build());
+                }
+            }
+            return results;
+        } finally {
+            executor.shutdown();
+            try {
+                if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                executor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * 串行下载多个页面
+     *
+     * @param request 批量下载请求
+     * @param totalImages 总图片数统计
+     * @param successImages 成功图片数统计
+     * @param failImages 失败图片数统计
+     * @return 每个页面的下载结果
+     */
+    private List<BatchDownloadResponse.PageDownloadResult> batchDownloadSequential(
+            BatchDownloadRequest request,
+            AtomicInteger totalImages,
+            AtomicInteger successImages,
+            AtomicInteger failImages) {
+        
+        List<BatchDownloadResponse.PageDownloadResult> results = new ArrayList<>();
+        
+        for (int i = 0; i < request.getUrls().size(); i++) {
+            String url = request.getUrls().get(i);
+            log.info("开始下载第 {}/{} 个页面: {}", i + 1, request.getUrls().size(), url);
+            
+            BatchDownloadResponse.PageDownloadResult result = downloadSinglePage(
+                    url, request, totalImages, successImages, failImages);
+            results.add(result);
+            
+            // 页面之间添加间隔，避免请求过快
+            if (i < request.getUrls().size() - 1 && downloadConfig.getRequestInterval() != null) {
+                try {
+                    Thread.sleep(downloadConfig.getRequestInterval() * 2); // 页面间隔是图片间隔的2倍
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    log.warn("页面间隔等待被中断");
+                }
+            }
+        }
+        
+        return results;
+    }
+
+    /**
+     * 下载单个页面
+     *
+     * @param url 页面URL
+     * @param batchRequest 批量下载请求（包含配置）
+     * @param totalImages 总图片数统计
+     * @param successImages 成功图片数统计
+     * @param failImages 失败图片数统计
+     * @return 该页面的下载结果
+     */
+    private BatchDownloadResponse.PageDownloadResult downloadSinglePage(
+            String url,
+            BatchDownloadRequest batchRequest,
+            AtomicInteger totalImages,
+            AtomicInteger successImages,
+            AtomicInteger failImages) {
+        
+        long pageStartTime = System.currentTimeMillis();
+        
+        try {
+            // 构建单个页面的下载请求
+            DownloadRequest singleRequest = new DownloadRequest();
+            singleRequest.setUrl(url);
+            singleRequest.setTargetDir(batchRequest.getTargetDir());
+            singleRequest.setSavePath(batchRequest.getSavePath());
+            singleRequest.setUseTimestamp(batchRequest.getUseTimestamp());
+            singleRequest.setTimestampFormat(batchRequest.getTimestampFormat());
+            singleRequest.setConvertToJpeg(batchRequest.getConvertToJpeg());
+            singleRequest.setCrawlAllPages(batchRequest.getCrawlAllPages());
+            singleRequest.setMaxPages(batchRequest.getMaxPages());
+            singleRequest.setRemoveWatermark(batchRequest.getRemoveWatermark());
+            singleRequest.setWatermarkProvider(batchRequest.getWatermarkProvider());
+            singleRequest.setSaveOriginal(batchRequest.getSaveOriginal());
+
+            // 调用单个页面下载方法
+            DownloadResponse response = downloadImages(singleRequest);
+
+            // 更新统计
+            if (response.getTotalCount() != null) {
+                totalImages.addAndGet(response.getTotalCount());
+            }
+            if (response.getSuccessCount() != null) {
+                successImages.addAndGet(response.getSuccessCount());
+            }
+            if (response.getFailCount() != null) {
+                failImages.addAndGet(response.getFailCount());
+            }
+
+            long pageDuration = System.currentTimeMillis() - pageStartTime;
+
+            return BatchDownloadResponse.PageDownloadResult.builder()
+                    .url(url)
+                    .success(response.getSuccess())
+                    .message(response.getMessage())
+                    .totalCount(response.getTotalCount())
+                    .successCount(response.getSuccessCount())
+                    .failCount(response.getFailCount())
+                    .savePath(response.getSavePath())
+                    .failedUrls(response.getFailedUrls())
+                    .duration(pageDuration)
+                    .watermarkStats(response.getWatermarkStats())
+                    .build();
+
+        } catch (Exception e) {
+            log.error("下载页面失败: {}", url, e);
+            long pageDuration = System.currentTimeMillis() - pageStartTime;
+            
+            return BatchDownloadResponse.PageDownloadResult.builder()
+                    .url(url)
+                    .success(false)
+                    .message("下载失败: " + e.getMessage())
+                    .totalCount(0)
+                    .successCount(0)
+                    .failCount(0)
+                    .duration(pageDuration)
+                    .build();
+        }
     }
 }
 

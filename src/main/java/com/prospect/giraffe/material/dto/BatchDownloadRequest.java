@@ -2,21 +2,24 @@ package com.prospect.giraffe.material.dto;
 
 import lombok.Data;
 
-import javax.validation.constraints.NotBlank;
+import javax.validation.constraints.NotEmpty;
+import javax.validation.constraints.NotNull;
+import java.util.List;
 
 /**
- * 下载请求
+ * 批量下载请求
  *
  * @author giraffe
  */
 @Data
-public class DownloadRequest {
+public class BatchDownloadRequest {
 
     /**
-     * HTML页面URL
+     * 页面URL列表（必填）
      */
-    @NotBlank(message = "URL不能为空")
-    private String url;
+    @NotEmpty(message = "URL列表不能为空")
+    @NotNull(message = "URL列表不能为null")
+    private List<String> urls;
 
     /**
      * 目标目录（可选）
@@ -35,18 +38,12 @@ public class DownloadRequest {
 
     /**
      * 是否添加时间戳子目录（默认true）
-     * - true: 在目标目录下创建时间戳子目录，如 "20251230_180000"
-     * - false: 直接保存在目标目录
      */
     private Boolean useTimestamp = true;
 
     /**
      * 自定义时间戳格式（可选）
      * 默认：yyyyMMdd_HHmmss
-     * 示例：
-     * - "yyyy-MM-dd": 2025-12-30
-     * - "yyyyMMdd": 20251230
-     * - "yyyy/MM/dd": 2025/12/30
      */
     private String timestampFormat;
 
@@ -67,28 +64,30 @@ public class DownloadRequest {
 
     /**
      * 是否去除水印（默认false）
-     * - true: 启用水印去除
-     * - false: 不处理水印
-     * - null: 使用全局配置
      */
     private Boolean removeWatermark = false;
 
     /**
      * 水印去除服务商（可选）
-     * - aliyun: 阿里云
-     * - tencent: 腾讯云
-     * - baidu: 百度智能云
-     * - disabled: 禁用
-     * - null: 使用全局默认配置
      */
     private String watermarkProvider;
 
     /**
      * 是否保存原图（可选）
-     * - true: 保存原图和处理后的图片
-     * - false: 只保存处理后的图片
-     * - null: 使用全局配置
      */
     private Boolean saveOriginal;
+
+    /**
+     * 是否并发下载（默认true）
+     * - true: 多个页面并发下载
+     * - false: 串行下载
+     */
+    private Boolean concurrent = true;
+
+    /**
+     * 最大并发数（默认3）
+     * 仅在 concurrent=true 时生效
+     */
+    private Integer maxConcurrency = 3;
 }
 

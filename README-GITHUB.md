@@ -16,7 +16,8 @@
 - 📄 **自动翻页爬取** - 自动识别分页，爬取所有页面的图片
 - 🖼️ **格式转换** - 自动转换图片为 JPEG 格式
 - 🤖 **AI 去水印** - 支持阿里云、腾讯云、百度云（可选）
-- 🔄 **失败重试** - 可配置的重试机制
+- 📦 **批量下载** - 支持一次性下载多个页面，并发/串行模式可选
+- 🔄 **失败重试** - 指数退避重试策略，提高成功率
 - 📊 **详细统计** - 完整的下载和处理统计信息
 - 🚀 **RESTful API** - 标准的 HTTP 接口
 
@@ -84,6 +85,23 @@ curl -X POST http://localhost:8080/api/v1/download/images \
     "targetDir": "clean_photos",
     "removeWatermark": true,
     "watermarkProvider": "aliyun"
+  }'
+```
+
+### 批量下载多个页面
+
+```bash
+curl -X POST http://localhost:8080/api/v1/download/images/batch \
+  -H "Content-Type: application/json" \
+  -d '{
+    "urls": [
+      "https://example.com/photos/page1",
+      "https://example.com/photos/page2",
+      "https://example.com/photos/page3"
+    ],
+    "targetDir": "batch_photos",
+    "concurrent": true,
+    "maxConcurrency": 3
   }'
 ```
 

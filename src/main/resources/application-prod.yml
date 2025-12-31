@@ -16,7 +16,7 @@ material:
 logging:
   level:
     root: WARN
-    com.tcxy.xygj: INFO
+    com.prospect.giraffe: INFO
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
   file:
