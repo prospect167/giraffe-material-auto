@@ -393,7 +393,7 @@ public class ImageDownloadService {
     }
     
     /**
-     * 从Document中提取图片URL
+     * 从Document中提取图片URL（优先提取高清图）
      *
      * @param doc     文档对象
      * @param pageUrl 页面URL
@@ -402,49 +402,402 @@ public class ImageDownloadService {
     private Set<String> extractImagesFromDocument(Document doc, String pageUrl) {
         Set<String> imageUrls = new HashSet<>();
         
-        // 提取所有img标签的src属性
-        Elements imgElements = doc.select("img[src]");
+        // V2.x 详情页提取已禁用
+        // 原因：虽然访问详情页看起来能获取更高清的图片，但实际测试发现：
+        // 1. 清晰度没有提升（详情页的图片最终也是升级到 /raw/ 路径）
+        // 2. 失败率更高（某些图片的 /raw/ 版本返回404）
+        // 3. 耗时增加 2-3 倍（需要额外访问每个详情页）
+        // 4. 复杂度增加（更容易出错）
+        // 
+        // 结论：回退到 V1.0 的简单模式，直接从相册页提取图片并升级到 /raw/
+        //
+        // 如需启用详情页提取，请取消下面代码的注释：
+        /*
+        boolean isDoubanAlbum = pageUrl.contains("douban.com") && 
+                               (pageUrl.contains("/photos") || pageUrl.contains("/all_photos"));
+        
+        if (isDoubanAlbum) {
+            log.info("检测到豆瓣相册页面: {}", pageUrl);
+            Set<String> detailPageUrls = extractDoubanPhotoDetailUrls(doc);
+            
+            if (!detailPageUrls.isEmpty()) {
+                log.info("找到 {} 个图片详情页，开始提取超高清图", detailPageUrls.size());
+                int successCount = 0;
+                
+                for (String detailUrl : detailPageUrls) {
+                    try {
+                        Thread.sleep(500);
+                        String ultraHdUrl = extractUltraHdImageFromDoubanDetail(detailUrl);
+                        
+                        if (ultraHdUrl != null && !ultraHdUrl.isEmpty()) {
+                            if (isValidImageUrl(ultraHdUrl)) {
+                                imageUrls.add(ultraHdUrl);
+                                successCount++;
+                                log.debug("✓ 从详情页提取到超高清图: {}", ultraHdUrl);
+                            } else {
+                                log.warn("✗ 提取的不是图片URL: {}", ultraHdUrl);
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        log.error("线程被中断: {}", e.getMessage());
+                        break;
+                    } catch (Exception e) {
+                        log.warn("✗ 从详情页提取图片失败: {}, 错误: {}", detailUrl, e.getMessage());
+                    }
+                }
+                
+                if (!imageUrls.isEmpty()) {
+                    log.info("成功从 {} 个详情页提取到超高清图", successCount);
+                    return imageUrls;
+                }
+                
+                log.warn("从详情页提取失败（成功0个），回退到普通模式");
+            } else {
+                log.warn("未能提取到详情页链接，回退到普通模式");
+            }
+        }
+        */
+        
+        // 优先级2: 提取 img 标签的高清属性（data-rawurl, data-highres 等）
+        Elements imgElements = doc.select("img");
         for (Element img : imgElements) {
-            String src = img.absUrl("src");
-            if (src != null && !src.isEmpty() && isValidImageUrl(src)) {
-                imageUrls.add(src);
+            // 尝试多种高清图属性（按优先级顺序）
+            String[] highResAttrs = {
+                "data-rawurl",      // 豆瓣等网站的原图URL
+                "data-raw",
+                "data-highres",
+                "data-original-url",
+                "data-large",
+                "data-hd"
+            };
+            
+            boolean foundHighRes = false;
+            for (String attr : highResAttrs) {
+                String highResUrl = img.absUrl(attr);
+                if (highResUrl != null && !highResUrl.isEmpty() && isValidImageUrl(highResUrl)) {
+                    imageUrls.add(highResUrl);
+                    log.debug("提取到高清图片（{}）: {}", attr, highResUrl);
+                    foundHighRes = true;
+                    break;  // 找到高清版本就跳出
+                }
+            }
+            
+            // 如果没有找到高清版本，尝试从普通src中升级为高清
+            if (!foundHighRes) {
+                String src = img.absUrl("src");
+                if (src != null && !src.isEmpty() && isValidImageUrl(src)) {
+                    String upgradedUrl = upgradeToHighResolution(src);
+                    imageUrls.add(upgradedUrl);
+                    if (!upgradedUrl.equals(src)) {
+                        log.debug("升级图片URL为高清: {} -> {}", src, upgradedUrl);
+                    }
+                }
             }
         }
         
-        // 提取所有data-src属性（懒加载图片）
+        // 优先级3: 提取所有data-src属性（懒加载图片）
         Elements lazyImgElements = doc.select("img[data-src]");
         for (Element img : lazyImgElements) {
             String dataSrc = img.absUrl("data-src");
             if (dataSrc != null && !dataSrc.isEmpty() && isValidImageUrl(dataSrc)) {
-                imageUrls.add(dataSrc);
+                String upgradedUrl = upgradeToHighResolution(dataSrc);
+                imageUrls.add(upgradedUrl);
             }
         }
         
-        // 提取所有data-original属性（另一种懒加载方式）
+        // 优先级4: 提取所有data-original属性（另一种懒加载方式）
         Elements originalImgElements = doc.select("img[data-original]");
         for (Element img : originalImgElements) {
             String dataOriginal = img.absUrl("data-original");
             if (dataOriginal != null && !dataOriginal.isEmpty() && isValidImageUrl(dataOriginal)) {
-                imageUrls.add(dataOriginal);
+                String upgradedUrl = upgradeToHighResolution(dataOriginal);
+                imageUrls.add(upgradedUrl);
             }
         }
         
-        // 提取div的background-image（如果有）
+        // 优先级5: 提取div的background-image（如果有）
         Elements bgElements = doc.select("[style*=background-image]");
         for (Element element : bgElements) {
             String style = element.attr("style");
             String url = extractUrlFromStyle(style);
             if (url != null && !url.isEmpty() && isValidImageUrl(url)) {
                 if (url.startsWith("http")) {
-                    imageUrls.add(url);
+                    String upgradedUrl = upgradeToHighResolution(url);
+                    imageUrls.add(upgradedUrl);
                 } else {
                     String baseUrl = pageUrl.substring(0, pageUrl.indexOf("/", 8));
-                    imageUrls.add(baseUrl + url);
+                    String fullUrl = baseUrl + url;
+                    String upgradedUrl = upgradeToHighResolution(fullUrl);
+                    imageUrls.add(upgradedUrl);
                 }
             }
         }
         
+        log.info("提取到 {} 个图片URL（已优先使用高清版本）", imageUrls.size());
         return imageUrls;
+    }
+    
+    /**
+     * 将图片URL升级为高清版本
+     * 通过替换URL中的尺寸参数来获取高清图
+     *
+     * @param url 原始URL
+     * @return 高清URL
+     */
+    private String upgradeToHighResolution(String url) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        
+        String upgradedUrl = url;
+        
+        // 豆瓣图片：替换尺寸参数
+        // 例如: https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2895695254.jpg
+        // -> https://img9.doubanio.com/view/photo/raw/public/p2895695254.jpg
+        if (url.contains("doubanio.com") || url.contains("douban.com")) {
+            upgradedUrl = url.replaceAll("/s_ratio_poster/", "/raw/")
+                            .replaceAll("/m_ratio_poster/", "/raw/")
+                            .replaceAll("/l_ratio_poster/", "/raw/")
+                            .replaceAll("/photo/s/", "/photo/raw/")
+                            .replaceAll("/photo/m/", "/photo/raw/")
+                            .replaceAll("/photo/l/", "/photo/raw/");
+        }
+        
+        // 通用规则1: 替换常见的尺寸标识
+        upgradedUrl = upgradedUrl.replaceAll("_thumb\\.", "_large.")
+                                .replaceAll("_small\\.", "_large.")
+                                .replaceAll("_medium\\.", "_large.")
+                                .replaceAll("_s\\.", "_l.")
+                                .replaceAll("_m\\.", "_l.")
+                                .replaceAll("/thumb/", "/large/")
+                                .replaceAll("/small/", "/large/")
+                                .replaceAll("/medium/", "/large/");
+        
+        // 通用规则2: 移除或替换查询参数中的尺寸限制
+        if (upgradedUrl.contains("?")) {
+            String[] parts = upgradedUrl.split("\\?");
+            if (parts.length == 2) {
+                String queryString = parts[1];
+                // 移除常见的尺寸限制参数
+                queryString = queryString.replaceAll("&?w=\\d+", "")
+                                        .replaceAll("&?h=\\d+", "")
+                                        .replaceAll("&?width=\\d+", "")
+                                        .replaceAll("&?height=\\d+", "")
+                                        .replaceAll("&?size=\\w+", "")
+                                        .replaceAll("&?quality=\\d+", "")
+                                        .replaceAll("^&", "");
+                
+                if (!queryString.isEmpty()) {
+                    upgradedUrl = parts[0] + "?" + queryString;
+                } else {
+                    upgradedUrl = parts[0];
+                }
+            }
+        }
+        
+        return upgradedUrl;
+    }
+    
+    /**
+     * 判断是否为高清图片URL
+     * 通过URL特征判断是否为高清版本
+     *
+     * @param url 图片URL
+     * @return 是否为高清图
+     */
+    private boolean isHighResolutionImage(String url) {
+        if (url == null || url.isEmpty()) {
+            return false;
+        }
+        
+        String lowerUrl = url.toLowerCase();
+        
+        // 排除明显的缩略图标识
+        if (lowerUrl.contains("thumb") || lowerUrl.contains("small") || 
+            lowerUrl.contains("_s.") || lowerUrl.contains("_m.") ||
+            lowerUrl.contains("/s/") || lowerUrl.contains("/m/")) {
+            return false;
+        }
+        
+        // 常见图片扩展名
+        return lowerUrl.matches(".*\\.(jpg|jpeg|png|webp|gif|bmp)(\\?.*)?$");
+    }
+    
+    /**
+     * 从豆瓣相册页面提取图片详情页URL
+     *
+     * @param doc 文档对象
+     * @return 详情页URL集合
+     */
+    private Set<String> extractDoubanPhotoDetailUrls(Document doc) {
+        Set<String> detailUrls = new HashSet<>();
+        
+        // 豆瓣相册页面的图片详情链接格式：
+        // <a href="/photos/photo/2541307071/" ...>
+        // 或 <a href="https://movie.douban.com/photos/photo/2541307071/" ...>
+        Elements photoLinks = doc.select("a[href*=/photos/photo/]");
+        
+        for (Element link : photoLinks) {
+            String href = link.absUrl("href");
+            
+            if (href != null && !href.isEmpty()) {
+                // 移除锚点（#...）
+                if (href.contains("#")) {
+                    href = href.substring(0, href.indexOf("#"));
+                }
+                
+                // 移除查询参数（?...）
+                if (href.contains("?")) {
+                    href = href.substring(0, href.indexOf("?"));
+                }
+                
+                // 确保以 / 结尾
+                if (!href.endsWith("/")) {
+                    href = href + "/";
+                }
+                
+                // 确保是图片详情页（以数字ID结尾）
+                if (href.matches(".*\\/photos\\/photo\\/\\d+\\/?$")) {
+                    detailUrls.add(href);
+                    log.debug("提取到详情页链接: {}", href);
+                }
+            }
+        }
+        
+        log.info("从相册页面提取到 {} 个详情页链接", detailUrls.size());
+        return detailUrls;
+    }
+    
+    /**
+     * 从豆瓣图片详情页提取超高清图URL
+     *
+     * @param detailPageUrl 详情页URL
+     * @return 超高清图URL，如果提取失败返回null
+     * @throws IOException IO异常
+     */
+    private String extractUltraHdImageFromDoubanDetail(String detailPageUrl) throws IOException {
+        log.debug("正在访问详情页: {}", detailPageUrl);
+        
+        Document detailDoc = Jsoup.connect(detailPageUrl)
+                .userAgent(downloadConfig.getUserAgent())
+                .timeout(downloadConfig.getTimeout())
+                .referrer(detailPageUrl)  // 添加 Referer
+                .get();
+        
+        // 策略1: 查找最大的 img 标签（通常在 div.photo-wp 中）
+        Elements mainImages = detailDoc.select("div.photo-wp img, div.mainphoto img, img#mainpic, img.view_photo");
+        if (!mainImages.isEmpty()) {
+            Element mainImg = mainImages.first();
+            log.debug("找到主图片标签: {}", mainImg.tagName());
+            
+            // 尝试多个可能包含高清图的属性（按优先级排序）
+            String[] hdAttrs = {
+                "data-rawurl",      // 豆瓣原图属性（最高优先级！）
+                "data-original",    // 懒加载原图
+                "data-highres",     // 高清属性
+                "data-large",       // 大图属性
+                "data-src",         // 懒加载
+                "src"               // 最后尝试 src（可能只是 l 或 m）
+            };
+            
+            for (String attr : hdAttrs) {
+                String imgUrl = mainImg.absUrl(attr);
+                if (imgUrl != null && !imgUrl.isEmpty()) {
+                    log.debug("检查属性 [{}]: {}", attr, imgUrl);
+                    
+                    // 确保是有效的图片URL
+                    if (isValidImageUrl(imgUrl)) {
+                        // 升级为最高清版本（统一升级到 raw）
+                        String ultraHdUrl = upgradeToUltraHighResolution(imgUrl);
+                        
+                        // 如果是 data-rawurl，直接使用不需要升级
+                        if ("data-rawurl".equals(attr) && imgUrl.contains("/raw/")) {
+                            log.info("✓ 直接获取到豆瓣原图（data-rawurl）: {}", imgUrl);
+                            return imgUrl;
+                        }
+                        
+                        log.info("✓ 成功提取图片URL（属性: {}）: {}", attr, ultraHdUrl);
+                        return ultraHdUrl;
+                    } else {
+                        log.debug("不是有效的图片URL: {}", imgUrl);
+                    }
+                }
+            }
+        } else {
+            log.warn("未找到主图片标签");
+        }
+        
+        // 策略2: 查找 "查看原图" 链接
+        Elements viewOriginalLinks = detailDoc.select("a.mainphoto, a[href*=view/photo]");
+        if (!viewOriginalLinks.isEmpty()) {
+            String largePhotoUrl = viewOriginalLinks.first().absUrl("href");
+            if (largePhotoUrl != null && !largePhotoUrl.isEmpty() && isValidImageUrl(largePhotoUrl)) {
+                String ultraHdUrl = upgradeToUltraHighResolution(largePhotoUrl);
+                log.info("✓ 从'查看原图'链接获取: {}", ultraHdUrl);
+                return ultraHdUrl;
+            }
+        }
+        
+        // 策略3: 从页面中查找所有图片URL，选择最大的（通常是原图）
+        Elements allImages = detailDoc.select("img[src]");
+        String largestUrl = null;
+        int maxLength = 0;
+        
+        for (Element img : allImages) {
+            String src = img.absUrl("src");
+            if (src != null && isValidImageUrl(src)) {
+                // 排除小图标和头像
+                if (!src.contains("icon") && !src.contains("avatar") && src.length() > maxLength) {
+                    largestUrl = src;
+                    maxLength = src.length();
+                }
+            }
+        }
+        
+        if (largestUrl != null) {
+            String ultraHdUrl = upgradeToUltraHighResolution(largestUrl);
+            log.info("✓ 选择最大的图片URL: {}", ultraHdUrl);
+            return ultraHdUrl;
+        }
+        
+        log.error("✗ 无法从详情页提取超高清图: {}", detailPageUrl);
+        return null;
+    }
+    
+    /**
+     * 将图片URL升级为超高清版本（优先raw路径）
+     * 专门针对豆瓣等网站的最高清晰度版本
+     *
+     * @param url 原始URL
+     * @return 超高清URL
+     */
+    private String upgradeToUltraHighResolution(String url) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        
+        String ultraHdUrl = url;
+        
+        // 豆瓣图片：使用 raw 路径（这才是真正的高清原图）
+        if (url.contains("doubanio.com") || url.contains("douban.com")) {
+            String oldUrl = url;
+            
+            // 统一升级到 raw 路径（豆瓣的最高清版本）
+            ultraHdUrl = url.replaceAll("/view/photo/s/public/", "/view/photo/raw/public/")
+                            .replaceAll("/view/photo/m/public/", "/view/photo/raw/public/")
+                            .replaceAll("/view/photo/l/public/", "/view/photo/raw/public/")
+                            .replaceAll("/view/photo/photo/public/", "/view/photo/raw/public/");
+            
+            if (!ultraHdUrl.equals(oldUrl)) {
+                log.debug("升级到豆瓣高清(raw): {} -> {}", oldUrl, ultraHdUrl);
+            }
+        } else {
+            // 非豆瓣网站使用普通升级
+            ultraHdUrl = upgradeToHighResolution(url);
+        }
+        
+        return ultraHdUrl;
     }
     
     /**
