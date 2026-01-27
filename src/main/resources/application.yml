@@ -27,6 +27,10 @@ material:
     request-interval: 800
     # User-Agent
     user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
+    # 豆瓣Cookie（用于绕过拦截，从浏览器复制）
+    # 获取方式：浏览器访问豆瓣 → F12开发者工具 → Network → 刷新 → 复制Cookie请求头
+    # 注意：如果Cookie中有双引号，请删除或用 \' 替换
+    douban-cookie: ll=118268; bid=eq0tceYFKJ0; _pk_id.100001.4cf6=ad19773dd9b21364.1759482513.; __yadk_uid=V6Oi8COZ2ox20MhPPmer8z1tYyd7ukrV; _vwo_uuid_v2=D695464CF862EF646A3A6373A32884822|900ab5aea67117e8313368475d9b5d9a; __utmc=30149280; __utmc=223695111; _pk_ref.100001.4cf6=%5B%22%22%2C%22%22%2C1769509539%2C%22https%3A%2F%2Fsec.douban.com%2F%22%5D; ap_v=0,6.0; __utma=30149280.1801643959.1759482503.1769500876.1769509539.17; __utmz=30149280.1769509539.17.12.utmcsr=sec.douban.com|utmccn=(referral)|utmcmd=referral|utmcct=/; __utma=223695111.71808147.1759482513.1769501008.1769509540.17; __utmz=223695111.1769509540.17.13.utmcsr=sec.douban.com|utmccn=(referral)|utmcmd=referral|utmcct=/; dbsawcv1=MTc2OTUxMzc1OEBlNTI4OGUxYTA2OTNjNWFlMjg1MjgwMDJlZTIyY2QyZTQ0YzBkMWJjY2IyYzI4OGE5ZTYzZDhjNjYxZDNjYzQ0QGUxMTY0MTllZjEzMjk3ZDZAOTNkNzIzY2ViZTM5
 
 # 注意：日志配置已迁移到 log4j2.xml
 # logging:

@@ -250,10 +250,7 @@ public class ImageDownloadService {
         
         // 获取第一页
         log.info("开始爬取第 1 页: {}", firstPageUrl);
-        Document firstDoc = Jsoup.connect(firstPageUrl)
-                .userAgent(downloadConfig.getUserAgent())
-                .timeout(downloadConfig.getTimeout())
-                .get();
+        Document firstDoc = createDoubanConnection(firstPageUrl).get();
         
         // 提取第一页的图片
         Set<String> firstPageImages = extractImagesFromDocument(firstDoc, firstPageUrl);
@@ -287,10 +284,7 @@ public class ImageDownloadService {
                 // 添加延迟，避免请求过快
                 Thread.sleep(1000);
                 
-                Document doc = Jsoup.connect(pageUrl)
-                        .userAgent(downloadConfig.getUserAgent())
-                        .timeout(downloadConfig.getTimeout())
-                        .get();
+                Document doc = createDoubanConnection(pageUrl).get();
                 
                 Set<String> pageImages = extractImagesFromDocument(doc, pageUrl);
                 allImageUrls.addAll(pageImages);
@@ -402,22 +396,20 @@ public class ImageDownloadService {
     private Set<String> extractImagesFromDocument(Document doc, String pageUrl) {
         Set<String> imageUrls = new HashSet<>();
         
-        // V2.x 详情页提取已禁用
-        // 原因：虽然访问详情页看起来能获取更高清的图片，但实际测试发现：
-        // 1. 清晰度没有提升（详情页的图片最终也是升级到 /raw/ 路径）
-        // 2. 失败率更高（某些图片的 /raw/ 版本返回404）
-        // 3. 耗时增加 2-3 倍（需要额外访问每个详情页）
-        // 4. 复杂度增加（更容易出错）
-        // 
-        // 结论：回退到 V1.0 的简单模式，直接从相册页提取图片并升级到 /raw/
-        //
-        // 如需启用详情页提取，请取消下面代码的注释：
-        /*
+        // 🔥 V3.4: 豆瓣单张图片详情页 - 通过"上一张/下一张"递归爬取全部图片
+        if (pageUrl.contains("douban.com/photos/photo/") && pageUrl.matches(".*photos/photo/\\d+.*")) {
+            log.info("检测到豆瓣单张图片详情页，将通过详情页递归提取所有图片");
+            return extractAllDoubanPhotosByNavigation(doc, pageUrl);
+        }
+        
+        // 🔥 V3.2: 启用豆瓣相册详情页提取
+        // 原因：豆瓣相册列表页使用JavaScript动态加载图片，Jsoup无法直接提取
+        // 解决方案：先提取所有图片详情页链接，再从每个详情页提取高清图
         boolean isDoubanAlbum = pageUrl.contains("douban.com") && 
-                               (pageUrl.contains("/photos") || pageUrl.contains("/all_photos"));
+                               (pageUrl.contains("/photos?") || pageUrl.contains("/all_photos"));
         
         if (isDoubanAlbum) {
-            log.info("检测到豆瓣相册页面: {}", pageUrl);
+            log.info("检测到豆瓣相册页面: {}，将通过详情页提取高清图", pageUrl);
             Set<String> detailPageUrls = extractDoubanPhotoDetailUrls(doc);
             
             if (!detailPageUrls.isEmpty()) {
@@ -457,7 +449,6 @@ public class ImageDownloadService {
                 log.warn("未能提取到详情页链接，回退到普通模式");
             }
         }
-        */
         
         // 优先级2: 提取 img 标签的高清属性（data-rawurl, data-highres 等）
         Elements imgElements = doc.select("img");
@@ -555,10 +546,17 @@ public class ImageDownloadService {
         // 豆瓣图片：替换尺寸参数
         // 例如: https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2895695254.jpg
         // -> https://img9.doubanio.com/view/photo/raw/public/p2895695254.jpg
+        // 或: https://img9.doubanio.com/view/photo/l/public/p2929311086.webp
+        // -> https://img9.doubanio.com/view/photo/raw/public/p2929311086.webp
         if (url.contains("doubanio.com") || url.contains("douban.com")) {
             upgradedUrl = url.replaceAll("/s_ratio_poster/", "/raw/")
                             .replaceAll("/m_ratio_poster/", "/raw/")
                             .replaceAll("/l_ratio_poster/", "/raw/")
+                            .replaceAll("/view/photo/sqxs/", "/view/photo/raw/")
+                            .replaceAll("/view/photo/s/", "/view/photo/raw/")
+                            .replaceAll("/view/photo/m/", "/view/photo/raw/")
+                            .replaceAll("/view/photo/l/", "/view/photo/raw/")
+                            .replaceAll("/photo/sqxs/", "/photo/raw/")
                             .replaceAll("/photo/s/", "/photo/raw/")
                             .replaceAll("/photo/m/", "/photo/raw/")
                             .replaceAll("/photo/l/", "/photo/raw/");
@@ -633,34 +631,29 @@ public class ImageDownloadService {
     private Set<String> extractDoubanPhotoDetailUrls(Document doc) {
         Set<String> detailUrls = new HashSet<>();
         
-        // 豆瓣相册页面的图片详情链接格式：
-        // <a href="/photos/photo/2541307071/" ...>
-        // 或 <a href="https://movie.douban.com/photos/photo/2541307071/" ...>
-        Elements photoLinks = doc.select("a[href*=/photos/photo/]");
+        // 🔥 V3.3: 豆瓣使用JS动态加载链接，Jsoup看不到
+        // 解决方案：从图片URL中提取图片ID，构造详情页URL
+        // 例如：https://img9.doubanio.com/view/photo/m/public/p2929311086.webp
+        // 图片ID: 2929311086
+        // 详情页: https://movie.douban.com/photos/photo/2929311086/
         
-        for (Element link : photoLinks) {
-            String href = link.absUrl("href");
+        Elements imgElements = doc.select("img[src*=doubanio.com]");
+        log.debug("找到 {} 个豆瓣图片元素", imgElements.size());
+        
+        for (Element img : imgElements) {
+            String imgUrl = img.absUrl("src");
             
-            if (href != null && !href.isEmpty()) {
-                // 移除锚点（#...）
-                if (href.contains("#")) {
-                    href = href.substring(0, href.indexOf("#"));
-                }
+            if (imgUrl != null && !imgUrl.isEmpty()) {
+                // 从图片URL中提取图片ID
+                // 匹配模式：/p数字.扩展名
+                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("/p(\\d+)\\.(webp|jpg|png)");
+                java.util.regex.Matcher matcher = pattern.matcher(imgUrl);
                 
-                // 移除查询参数（?...）
-                if (href.contains("?")) {
-                    href = href.substring(0, href.indexOf("?"));
-                }
-                
-                // 确保以 / 结尾
-                if (!href.endsWith("/")) {
-                    href = href + "/";
-                }
-                
-                // 确保是图片详情页（以数字ID结尾）
-                if (href.matches(".*\\/photos\\/photo\\/\\d+\\/?$")) {
-                    detailUrls.add(href);
-                    log.debug("提取到详情页链接: {}", href);
+                if (matcher.find()) {
+                    String photoId = matcher.group(1);
+                    String detailUrl = "https://movie.douban.com/photos/photo/" + photoId + "/";
+                    detailUrls.add(detailUrl);
+                    log.debug("从图片URL {} 提取到详情页链接: {}", imgUrl, detailUrl);
                 }
             }
         }
@@ -679,11 +672,7 @@ public class ImageDownloadService {
     private String extractUltraHdImageFromDoubanDetail(String detailPageUrl) throws IOException {
         log.debug("正在访问详情页: {}", detailPageUrl);
         
-        Document detailDoc = Jsoup.connect(detailPageUrl)
-                .userAgent(downloadConfig.getUserAgent())
-                .timeout(downloadConfig.getTimeout())
-                .referrer(detailPageUrl)  // 添加 Referer
-                .get();
+        Document detailDoc = createDoubanConnection(detailPageUrl).get();
         
         // 策略1: 查找最大的 img 标签（通常在 div.photo-wp 中）
         Elements mainImages = detailDoc.select("div.photo-wp img, div.mainphoto img, img#mainpic, img.view_photo");
@@ -784,10 +773,17 @@ public class ImageDownloadService {
             String oldUrl = url;
             
             // 统一升级到 raw 路径（豆瓣的最高清版本）
+            // 支持多种路径格式：/view/photo/s/, /view/photo/l/, /s_ratio_poster/ 等
             ultraHdUrl = url.replaceAll("/view/photo/s/public/", "/view/photo/raw/public/")
                             .replaceAll("/view/photo/m/public/", "/view/photo/raw/public/")
                             .replaceAll("/view/photo/l/public/", "/view/photo/raw/public/")
-                            .replaceAll("/view/photo/photo/public/", "/view/photo/raw/public/");
+                            .replaceAll("/view/photo/photo/public/", "/view/photo/raw/public/")
+                            .replaceAll("/view/photo/s/", "/view/photo/raw/")
+                            .replaceAll("/view/photo/m/", "/view/photo/raw/")
+                            .replaceAll("/view/photo/l/", "/view/photo/raw/")
+                            .replaceAll("/s_ratio_poster/", "/raw/")
+                            .replaceAll("/m_ratio_poster/", "/raw/")
+                            .replaceAll("/l_ratio_poster/", "/raw/");
             
             if (!ultraHdUrl.equals(oldUrl)) {
                 log.debug("升级到豆瓣高清(raw): {} -> {}", oldUrl, ultraHdUrl);
@@ -827,10 +823,7 @@ public class ImageDownloadService {
      */
     private Set<String> parseImageUrls(String pageUrl) throws IOException {
         // 使用Jsoup解析HTML
-        Document doc = Jsoup.connect(pageUrl)
-                .userAgent(downloadConfig.getUserAgent())
-                .timeout(downloadConfig.getTimeout())
-                .get();
+        Document doc = createDoubanConnection(pageUrl).get();
 
         return extractImagesFromDocument(doc, pageUrl);
     }
@@ -946,15 +939,18 @@ public class ImageDownloadService {
         Exception lastException = null;
         int connectTimeout = downloadConfig.getConnectTimeout() != null ? downloadConfig.getConnectTimeout() : 10000;
         int readTimeout = downloadConfig.getReadTimeout() != null ? downloadConfig.getReadTimeout() : 60000;
+        
+        // 🔥 使用可修改的变量来支持智能降级
+        String currentUrl = imageUrl;
 
         while (retryCount < downloadConfig.getMaxRetry()) {
             HttpURLConnection connection = null;
             try {
                 // 获取文件名
-                String fileName = extractFileName(imageUrl);
-
+                String fileName = extractFileName(currentUrl);
+                
                 // 创建连接
-                URL url = new URL(imageUrl);
+                URL url = new URL(currentUrl);
                 connection = (HttpURLConnection) url.openConnection();
                 
                 // 设置请求头
@@ -1008,6 +1004,28 @@ public class ImageDownloadService {
                     connection.disconnect();
                     Thread.sleep(waitSeconds * 1000L);
                     throw new IOException("HTTP 429 请求过多，需要等待");
+                } else if (responseCode == 404) {
+                    connection.disconnect();
+                    
+                    // 🔥 智能降级：如果raw版本404，自动降级到l或m版本
+                    if (currentUrl.contains("/view/photo/raw/")) {
+                        // 第一次404，尝试降级到l版本
+                        String fallbackUrl = currentUrl.replace("/view/photo/raw/", "/view/photo/l/");
+                        log.warn("图片raw版本404，降级到l版本重试: {}", fallbackUrl);
+                        currentUrl = fallbackUrl;
+                        retryCount++; // 计入重试次数
+                        continue; // 继续循环，用新URL重试
+                    } else if (currentUrl.contains("/view/photo/l/")) {
+                        // 第二次404，再降级到m版本
+                        String fallbackUrl = currentUrl.replace("/view/photo/l/", "/view/photo/m/");
+                        log.warn("图片l版本404，降级到m版本重试: {}", fallbackUrl);
+                        currentUrl = fallbackUrl;
+                        retryCount++; // 计入重试次数
+                        continue; // 继续循环，用新URL重试
+                    }
+                    
+                    // 如果已经是m版本还404，或者不是豆瓣图片，抛出异常
+                    throw new IOException("HTTP响应码: 404 (图片不存在)");
                 } else if (responseCode != HttpURLConnection.HTTP_OK) {
                     connection.disconnect();
                     throw new IOException("HTTP响应码: " + responseCode);
@@ -1016,7 +1034,7 @@ public class ImageDownloadService {
                 // 检查Content-Type
                 String contentType = connection.getContentType();
                 if (contentType != null && !contentType.startsWith("image/")) {
-                    log.warn("URL返回的不是图片类型: {}, Content-Type: {}", imageUrl, contentType);
+                    log.warn("URL返回的不是图片类型: {}, Content-Type: {}", currentUrl, contentType);
                 }
 
                 // 下载并保存
@@ -1060,7 +1078,7 @@ public class ImageDownloadService {
                 }
                 lastException = e;
                 retryCount++;
-                log.warn("下载超时，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), imageUrl);
+                log.warn("下载超时，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), currentUrl);
                 // 指数退避：第1次重试等1秒，第2次等2秒，第3次等4秒
                 try {
                     Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
@@ -1074,7 +1092,7 @@ public class ImageDownloadService {
                 }
                 lastException = e;
                 retryCount++;
-                log.warn("连接失败，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), imageUrl);
+                log.warn("连接失败，正在重试 ({}/{}): {}", retryCount, downloadConfig.getMaxRetry(), currentUrl);
                 // 指数退避
                 try {
                     Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
@@ -1089,7 +1107,7 @@ public class ImageDownloadService {
                 lastException = e;
                 retryCount++;
                 log.warn("下载失败，正在重试 ({}/{}): {}, 错误: {}", 
-                        retryCount, downloadConfig.getMaxRetry(), imageUrl, e.getMessage());
+                        retryCount, downloadConfig.getMaxRetry(), currentUrl, e.getMessage());
                 // 指数退避
                 try {
                     Thread.sleep((long) Math.pow(2, retryCount - 1) * 1000);
@@ -1416,6 +1434,235 @@ public class ImageDownloadService {
                     .duration(pageDuration)
                     .build();
         }
+    }
+    
+    /**
+     * 从豆瓣图片详情页提取总图片数
+     * 
+     * @param doc 详情页Document
+     * @return 总图片数，提取失败返回0
+     */
+    private int extractTotalPhotoCount(Document doc) {
+        try {
+            // 豆瓣页面格式：第X张/共Y张
+            Elements countElements = doc.select("div:contains(张/共), span:contains(张/共)");
+            
+            for (Element elem : countElements) {
+                String text = elem.text();
+                // 匹配 "第182张/共252张" 或 "共252张" 等格式
+                java.util.regex.Pattern pattern = java.util.regex.Pattern.compile("共(\\d+)张");
+                java.util.regex.Matcher matcher = pattern.matcher(text);
+                
+                if (matcher.find()) {
+                    int total = Integer.parseInt(matcher.group(1));
+                    log.info("从页面提取到总图片数: {} 张", total);
+                    return total;
+                }
+            }
+        } catch (Exception e) {
+            log.warn("提取总图片数失败: {}", e.getMessage());
+        }
+        
+        return 0; // 提取失败，返回0
+    }
+    
+    /**
+     * 通过导航链接递归提取豆瓣所有图片（从单张详情页开始）
+     * 
+     * @param firstDoc 第一张图片详情页的Document
+     * @param firstUrl 第一张图片详情页的URL
+     * @return 所有图片URL集合
+     */
+    private Set<String> extractAllDoubanPhotosByNavigation(Document firstDoc, String firstUrl) {
+        Set<String> allImageUrls = new HashSet<>();
+        Set<String> visitedUrls = new HashSet<>();
+        
+        try {
+            // 🔥 从页面中提取总图片数
+            int totalPhotos = extractTotalPhotoCount(firstDoc);
+            int maxPhotos = totalPhotos > 0 ? totalPhotos : 500; // 如果能提取到总数就用总数，否则用500
+            log.info("开始递归爬取图片，预计总数: {} 张", maxPhotos);
+            
+            // 从当前页开始，沿着"下一张"链接遍历所有图片
+            Document currentDoc = firstDoc;
+            String currentUrl = firstUrl;
+            String startUrl = firstUrl; // 记录起始URL，用于检测循环
+            int count = 0;
+            
+            while (count < maxPhotos) {
+                // 标记为已访问
+                visitedUrls.add(currentUrl);
+                count++;
+                
+                // 从当前详情页提取高清图URL
+                String hdImageUrl = extractUltraHdImageFromDoubanDetail(currentDoc);
+                if (hdImageUrl != null && !hdImageUrl.isEmpty()) {
+                    allImageUrls.add(hdImageUrl);
+                    log.debug("第 {} 张: {}", count, hdImageUrl);
+                } else {
+                    log.warn("第 {} 张图片提取失败: {}", count, currentUrl);
+                }
+                
+                // 查找"下一张"链接（豆瓣页面：文本"下一张"或按钮"前进"）
+                Elements nextLinks = currentDoc.select("a:contains(下一张), a:contains(前进), a[class*=next]");
+                String nextUrl = null;
+                
+                for (Element link : nextLinks) {
+                    String href = link.absUrl("href");
+                    String text = link.text();
+                    
+                    // 确保是"下一张"或"前进"，而不是"上一张"或"后退"
+                    if (href != null && !href.isEmpty() && 
+                        (text.contains("下一张") || text.contains("前进") || link.attr("class").contains("next")) &&
+                        !text.contains("上一张") && !text.contains("后退")) {
+                        
+                        // 移除锚点
+                        if (href.contains("#")) {
+                            href = href.substring(0, href.indexOf("#"));
+                        }
+                        
+                        // 确保不是已访问过的URL，且不是起始URL（避免循环）
+                        if (!visitedUrls.contains(href) && 
+                            !href.equals(startUrl) && 
+                            href.matches(".*photos/photo/\\d+/?$")) {
+                            nextUrl = href;
+                            break;
+                        }
+                    }
+                }
+                
+                // 没有下一张了，退出循环
+                if (nextUrl == null) {
+                    log.info("已到达最后一张图片，共提取 {} 张", count);
+                    break;
+                }
+                
+                // 访问下一张
+                log.debug("访问下一张: {}", nextUrl);
+                Thread.sleep(500); // 避免请求过快
+                
+                currentDoc = createDoubanConnection(nextUrl).get();
+                currentUrl = nextUrl;
+            }
+            
+            if (count >= maxPhotos) {
+                log.warn("已达到最大图片数限制: {}", maxPhotos);
+            }
+            
+            log.info("通过详情页导航，成功提取 {} 张高清图", allImageUrls.size());
+            
+        } catch (Exception e) {
+            log.error("递归提取图片失败: {}", e.getMessage(), e);
+        }
+        
+        return allImageUrls;
+    }
+    
+    /**
+     * 从豆瓣图片详情页Document对象提取超高清图URL
+     * 
+     * @param doc 详情页Document
+     * @return 超高清图URL，如果提取失败返回null
+     */
+    private String extractUltraHdImageFromDoubanDetail(Document doc) {
+        try {
+            // 🔍 DEBUG：输出页面基本信息
+            String pageTitle = doc.title();
+            String pageText = doc.text();
+            log.info("📄 页面标题: {}", pageTitle);
+            log.debug("📄 页面文本长度: {} 字符", pageText.length());
+            log.debug("📄 页面HTML长度: {} 字符", doc.html().length());
+            
+            // 输出页面前500字符用于诊断
+            if (pageText.length() < 100 || pageTitle.isEmpty()) {
+                log.warn("⚠️  页面内容异常！前500字符: {}", doc.html().substring(0, Math.min(500, doc.html().length())));
+            }
+            
+            // 检查是否被拦截
+            if (pageTitle.equals("豆瓣") || doc.text().contains("点我继续浏览")) {
+                log.error("🚫 页面被豆瓣拦截！需要配置Cookie。请查看：豆瓣Cookie配置说明.md");
+                return null;
+            }
+            
+            // 豆瓣详情页的主图：优先使用 a.mainphoto img（最稳定）
+            Elements mainImages = doc.select("a.mainphoto img");
+            log.debug("尝试选择器 'a.mainphoto img': {} 个", mainImages.size());
+            
+            // 如果没有找到，尝试其他选择器
+            if (mainImages.isEmpty()) {
+                mainImages = doc.select("div.photo-show img");
+                log.debug("尝试选择器 'div.photo-show img': {} 个", mainImages.size());
+            }
+            
+            if (mainImages.isEmpty()) {
+                // 最后尝试：查找包含"查看下一张"或"查看上一张"的链接中的图片
+                mainImages = doc.select("a[title~=.*查看.*] img");
+                log.debug("尝试选择器 'a[title~=.*查看.*] img': {} 个", mainImages.size());
+            }
+            
+            // 兜底：查找所有doubanio图片
+            if (mainImages.isEmpty()) {
+                Elements allImages = doc.select("img[src*=doubanio.com]");
+                log.debug("兜底：查找所有doubanio图片: {} 个", allImages.size());
+                if (!allImages.isEmpty()) {
+                    mainImages = allImages;
+                }
+            }
+            
+            if (!mainImages.isEmpty()) {
+                Element mainImg = mainImages.first();
+                String imgUrl = mainImg.absUrl("src");
+                log.debug("找到图片URL: {}", imgUrl);
+                
+                if (imgUrl != null && !imgUrl.isEmpty() && imgUrl.contains("doubanio.com")) {
+                    // 升级到超高清版本
+                    String hdUrl = upgradeToHighResolution(imgUrl);
+                    log.info("✓ 提取到高清图: {}", hdUrl);
+                    return hdUrl;
+                } else {
+                    log.warn("图片URL无效或不包含doubanio.com: {}", imgUrl);
+                }
+            }
+            
+            log.error("❌ 未能从详情页提取到主图（页面标题：{}）", pageTitle);
+            return null;
+            
+        } catch (Exception e) {
+            log.error("提取详情页图片失败: {}", e.getMessage(), e);
+            return null;
+        }
+    }
+    
+    /**
+     * 创建配置好的Jsoup连接（绕过豆瓣拦截）
+     * 
+     * @param url 要访问的URL
+     * @return 配置好的Jsoup Connection对象
+     */
+    private org.jsoup.Connection createDoubanConnection(String url) {
+        org.jsoup.Connection conn = Jsoup.connect(url)
+                .userAgent(downloadConfig.getUserAgent())
+                .timeout(downloadConfig.getTimeout())
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Connection", "keep-alive")
+                .header("Upgrade-Insecure-Requests", "1")
+                .header("Sec-Fetch-Dest", "document")
+                .header("Sec-Fetch-Mode", "navigate")
+                .header("Sec-Fetch-Site", "none")
+                .header("Cache-Control", "max-age=0")
+                .referrer("https://movie.douban.com/")
+                .followRedirects(true)
+                .ignoreHttpErrors(false);
+        
+        // 如果配置了豆瓣Cookie，则添加
+        if (downloadConfig.getDoubanCookie() != null && !downloadConfig.getDoubanCookie().isEmpty()) {
+            conn.header("Cookie", downloadConfig.getDoubanCookie());
+            log.debug("使用豆瓣Cookie进行请求");
+        }
+        
+        return conn;
     }
 }
 

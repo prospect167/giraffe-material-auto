@@ -48,5 +48,10 @@ public class DownloadConfig {
      * 读取超时时间（毫秒）
      */
     private Integer readTimeout = 60000;
+    
+    /**
+     * 豆瓣Cookie（用于绕过拦截）
+     */
+    private String doubanCookie = "";
 }
 
