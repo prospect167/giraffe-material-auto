@@ -20,8 +20,12 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.BufferedReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.InflaterInputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -250,7 +254,7 @@ public class ImageDownloadService {
         
         // 获取第一页
         log.info("开始爬取第 1 页: {}", firstPageUrl);
-        Document firstDoc = createDoubanConnection(firstPageUrl).get();
+        Document firstDoc = getDocumentSafely(firstPageUrl);
         
         // 提取第一页的图片
         Set<String> firstPageImages = extractImagesFromDocument(firstDoc, firstPageUrl);
@@ -284,7 +288,7 @@ public class ImageDownloadService {
                 // 添加延迟，避免请求过快
                 Thread.sleep(1000);
                 
-                Document doc = createDoubanConnection(pageUrl).get();
+                Document doc = getDocumentSafely(pageUrl);
                 
                 Set<String> pageImages = extractImagesFromDocument(doc, pageUrl);
                 allImageUrls.addAll(pageImages);
@@ -672,7 +676,7 @@ public class ImageDownloadService {
     private String extractUltraHdImageFromDoubanDetail(String detailPageUrl) throws IOException {
         log.debug("正在访问详情页: {}", detailPageUrl);
         
-        Document detailDoc = createDoubanConnection(detailPageUrl).get();
+        Document detailDoc = getDocumentSafely(detailPageUrl);
         
         // 策略1: 查找最大的 img 标签（通常在 div.photo-wp 中）
         Elements mainImages = detailDoc.select("div.photo-wp img, div.mainphoto img, img#mainpic, img.view_photo");
@@ -823,7 +827,7 @@ public class ImageDownloadService {
      */
     private Set<String> parseImageUrls(String pageUrl) throws IOException {
         // 使用Jsoup解析HTML
-        Document doc = createDoubanConnection(pageUrl).get();
+        Document doc = getDocumentSafely(pageUrl);
 
         return extractImagesFromDocument(doc, pageUrl);
     }
@@ -1541,7 +1545,7 @@ public class ImageDownloadService {
                 log.debug("访问下一张: {}", nextUrl);
                 Thread.sleep(500); // 避免请求过快
                 
-                currentDoc = createDoubanConnection(nextUrl).get();
+                currentDoc = getDocumentSafely(nextUrl);
                 currentUrl = nextUrl;
             }
             
@@ -1634,6 +1638,44 @@ public class ImageDownloadService {
     }
     
     /**
+     * 安全获取Document（自动处理压缩问题）
+     * 先尝试Jsoup自动解压，如果检测到乱码则使用手动解压
+     * 
+     * @param url 要访问的URL
+     * @return 解析后的Document对象
+     * @throws IOException IO异常
+     */
+    private Document getDocumentSafely(String url) throws IOException {
+        try {
+            // 先尝试Jsoup自动解压
+            Document doc = createDoubanConnection(url).get();
+            
+            // 检测是否乱码：检查页面标题和内容
+            String pageTitle = doc.title();
+            String pageText = doc.text();
+            String htmlContent = doc.html();
+            
+            // 乱码特征：标题为空或很短，且HTML包含乱码字符（如&#x15;等HTML实体编码的不可见字符）
+            // 检查HTML是否包含大量HTML实体编码的不可见字符（这是gzip未解压的典型特征）
+            boolean hasInvisibleEntities = htmlContent.matches(".*&#x[0-9a-fA-F]{1,2};.*") && 
+                                          htmlContent.split("&#x[0-9a-fA-F]{1,2};").length > 10;
+            boolean isCorrupted = (pageTitle.isEmpty() || pageTitle.length() < 2) && 
+                                 (pageText.length() < 100 || hasInvisibleEntities ||
+                                  htmlContent.contains("jD") && htmlContent.contains("ϫ"));
+            
+            if (isCorrupted) {
+                log.warn("⚠️  检测到页面内容可能乱码，尝试使用手动解压方法重新获取: {}", url);
+                return fetchDocumentWithManualDecompression(url);
+            }
+            
+            return doc;
+        } catch (Exception e) {
+            log.warn("Jsoup自动解压失败，尝试使用手动解压方法: {}", e.getMessage());
+            return fetchDocumentWithManualDecompression(url);
+        }
+    }
+    
+    /**
      * 创建配置好的Jsoup连接（绕过豆瓣拦截）
      * 
      * @param url 要访问的URL
@@ -1643,26 +1685,120 @@ public class ImageDownloadService {
         org.jsoup.Connection conn = Jsoup.connect(url)
                 .userAgent(downloadConfig.getUserAgent())
                 .timeout(downloadConfig.getTimeout())
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                .header("Accept-Encoding", "gzip, deflate, br")
+                // 🔥 修复：明确指定只接受gzip压缩，避免br压缩导致Jsoup无法解压
+                .header("Accept-Encoding", "gzip, deflate")
                 .header("Connection", "keep-alive")
                 .header("Upgrade-Insecure-Requests", "1")
-                .header("Sec-Fetch-Dest", "document")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-Site", "none")
                 .header("Cache-Control", "max-age=0")
                 .referrer("https://movie.douban.com/")
                 .followRedirects(true)
-                .ignoreHttpErrors(false);
+                .ignoreHttpErrors(false)
+                .ignoreContentType(false);
         
         // 如果配置了豆瓣Cookie，则添加
         if (downloadConfig.getDoubanCookie() != null && !downloadConfig.getDoubanCookie().isEmpty()) {
             conn.header("Cookie", downloadConfig.getDoubanCookie());
-            log.debug("使用豆瓣Cookie进行请求");
+            log.debug("✅ 使用豆瓣Cookie进行请求");
+        } else {
+            log.warn("⚠️  未配置豆瓣Cookie，可能被拦截");
         }
         
         return conn;
+    }
+    
+    /**
+     * 手动获取并解析HTML文档（处理压缩响应）
+     * 当Jsoup自动解压失败时使用此方法
+     * 
+     * @param url 要访问的URL
+     * @return 解析后的Document对象
+     * @throws IOException IO异常
+     */
+    private Document fetchDocumentWithManualDecompression(String url) throws IOException {
+        int connectTimeout = downloadConfig.getConnectTimeout() != null ? downloadConfig.getConnectTimeout() : 10000;
+        int readTimeout = downloadConfig.getReadTimeout() != null ? downloadConfig.getReadTimeout() : 60000;
+        
+        URL urlObj = new URL(url);
+        HttpURLConnection connection = (HttpURLConnection) urlObj.openConnection();
+        
+        try {
+            // 设置请求头
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", downloadConfig.getUserAgent());
+            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            connection.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+            connection.setRequestProperty("Accept-Encoding", "gzip, deflate");
+            connection.setRequestProperty("Connection", "keep-alive");
+            connection.setRequestProperty("Upgrade-Insecure-Requests", "1");
+            connection.setRequestProperty("Cache-Control", "max-age=0");
+            connection.setRequestProperty("Referer", "https://movie.douban.com/");
+            
+            // 如果配置了豆瓣Cookie，则添加
+            if (downloadConfig.getDoubanCookie() != null && !downloadConfig.getDoubanCookie().isEmpty()) {
+                connection.setRequestProperty("Cookie", downloadConfig.getDoubanCookie());
+                log.debug("✅ 使用豆瓣Cookie进行请求（手动解压模式）");
+            }
+            
+            // 设置超时
+            connection.setConnectTimeout(connectTimeout);
+            connection.setReadTimeout(readTimeout);
+            
+            // 允许重定向
+            connection.setInstanceFollowRedirects(true);
+            
+            // 连接
+            connection.connect();
+            
+            // 检查响应码
+            int responseCode = connection.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new IOException("HTTP请求失败，响应码: " + responseCode);
+            }
+            
+            // 获取Content-Encoding响应头
+            String contentEncoding = connection.getContentEncoding();
+            String contentType = connection.getContentType();
+            log.debug("响应头 - Content-Type: {}, Content-Encoding: {}", contentType, contentEncoding);
+            
+            // 获取输入流
+            InputStream inputStream = connection.getInputStream();
+            
+            // 根据Content-Encoding解压
+            InputStream decompressedStream = inputStream;
+            if (contentEncoding != null) {
+                if (contentEncoding.toLowerCase().contains("gzip")) {
+                    log.debug("检测到gzip压缩，开始解压");
+                    decompressedStream = new GZIPInputStream(inputStream);
+                } else if (contentEncoding.toLowerCase().contains("deflate")) {
+                    log.debug("检测到deflate压缩，开始解压");
+                    decompressedStream = new InflaterInputStream(inputStream);
+                } else if (contentEncoding.toLowerCase().contains("br")) {
+                    log.warn("⚠️  检测到Brotli(br)压缩，Jsoup可能无法处理。建议服务器只返回gzip压缩。");
+                    // Brotli需要额外库，这里先尝试不解压
+                    decompressedStream = inputStream;
+                }
+            }
+            
+            // 读取响应内容
+            BufferedReader reader = new BufferedReader(new InputStreamReader(decompressedStream, "UTF-8"));
+            StringBuilder htmlContent = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                htmlContent.append(line).append("\n");
+            }
+            reader.close();
+            
+            // 使用Jsoup解析HTML
+            Document doc = Jsoup.parse(htmlContent.toString(), url);
+            log.debug("✅ 手动解压并解析成功，HTML长度: {} 字符", htmlContent.length());
+            
+            return doc;
+            
+        } finally {
+            connection.disconnect();
+        }
     }
 }
 
