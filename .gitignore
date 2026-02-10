@@ -51,6 +51,12 @@ logs/
 .env.local
 .env.*.local
 
+### Local Configuration Files (contain secrets) ###
+application-local.yml
+application-local.yaml
+**/application-local.yml
+**/application-local.yaml
+
 ### Backup files ###
 *.bak
 *.swp
