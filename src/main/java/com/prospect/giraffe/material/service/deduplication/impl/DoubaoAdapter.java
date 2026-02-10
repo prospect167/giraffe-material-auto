@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit;
  * 豆包图像处理适配器（主方案）
  * 使用火山引擎方舟平台 - 豆包 Seedream 4.5 图片生成模型
  * 参考文档：https://www.volcengine.com/docs/82379/1824121?lang=zh
+ *         https://www.volcengine.com/docs/82379/1541523?lang=zh
  * 
  * 采用【图生图】模式：传入原始图片 + 提示词，基于原图进行编辑（去水印/去文字/去logo）
  * 
